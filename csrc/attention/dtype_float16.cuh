@@ -441,4 +441,5 @@ inline __device__ Float8_ to_float(uint4 u) {
   return tmp;
 }
 
+
 } // namespace vllm
