@@ -391,7 +391,13 @@ void single_query_cached_kv_attention_launcher(
   int padded_max_context_len = ((max_context_len + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE;
   int logits_size = padded_max_context_len * sizeof(float);
   int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
-  int shared_mem_size = std::max(logits_size, outputs_size);
+
+  # We over allocate this buffer such that its size won't be too
+  # small no matter which one of logits_size and outputs_size
+  # is larger and even this relative relationship change
+  # during the run (for CUDA Graph)
+  #
+  int shared_mem_size = std::max(logits_size, outputs_size) + 10000;
 
   dim3 grid(num_heads, num_seqs);
   dim3 block(NUM_THREADS);
