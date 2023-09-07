@@ -397,7 +397,8 @@ void single_query_cached_kv_attention_launcher(
   // is larger and even this relative relationship change
   // during the run (for CUDA Graph)
   //
-  int shared_mem_size = std::max(logits_size, outputs_size) + 10000;
+  // int shared_mem_size = std::max(logits_size, outputs_size) + 10000;
+  int shared_mem_size = 48000;
 
   dim3 grid(num_heads, num_seqs);
   dim3 block(NUM_THREADS);
