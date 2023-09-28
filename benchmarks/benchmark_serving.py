@@ -24,8 +24,8 @@ from typing import AsyncGenerator, List, Tuple
 
 import aiohttp
 import numpy as np
-from transformers import PreTrainedTokenizerBase
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from transformers import PreTrainedTokenizerBase, AutoTokenizer
+#from vllm.transformers_utils.tokenizer import get_tokenizer
 
 # (prompt len, output len, latency)
 REQUEST_LATENCY: List[Tuple[int, int, float]] = []
@@ -177,7 +177,7 @@ def main(args: argparse.Namespace):
     np.random.seed(args.seed)
 
     api_url = f"http://{args.host}:{args.port}/generate"
-    tokenizer = get_tokenizer(args.tokenizer, trust_remote_code=args.trust_remote_code)
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=args.trust_remote_code)
     input_requests = sample_requests(args.dataset, args.num_prompts, tokenizer)
 
     benchmark_start_time = time.time()
