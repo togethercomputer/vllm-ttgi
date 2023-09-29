@@ -33,7 +33,7 @@ class CacheEngine:
 
         self.head_size = model_config.get_head_size()
         self.num_layers = model_config.get_num_layers(parallel_config)
-        self.num_heads = model_config.get_num_heads(parallel_config)
+        self.num_heads = model_config.get_num_kv_heads(parallel_config)
         self.dtype = model_config.dtype
 
         self.block_size = cache_config.block_size
@@ -93,8 +93,8 @@ class CacheEngine:
         if not pin_memory:
             # Pinning memory in WSL is not supported.
             # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
-            logger.warn("Using 'pin_memory=False' as WSL is detected. "
-                        "This may slow down the performance.")
+            logger.warning("Using 'pin_memory=False' as WSL is detected. "
+                           "This may slow down the performance.")
         for _ in range(self.num_layers):
             key_blocks = torch.empty(
                 size=(self.num_cpu_blocks, *key_block_shape),
@@ -120,11 +120,10 @@ class CacheEngine:
                 src_key_cache, src_value_cache = src[i]
                 dst_key_cache, dst_value_cache = dst[i]
                 # Copy the key blocks.
-                cache_ops.swap_blocks(
-                    src_key_cache, dst_key_cache, src_to_dst)
+                cache_ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
                 # Copy the value blocks.
-                cache_ops.swap_blocks(
-                    src_value_cache, dst_value_cache, src_to_dst)
+                cache_ops.swap_blocks(src_value_cache, dst_value_cache,
+                                      src_to_dst)
                 event = self.events[i]
                 event.record(stream=self.cache_stream)
 
@@ -147,7 +146,7 @@ class CacheEngine:
         parallel_config: ParallelConfig,
     ) -> int:
         head_size = model_config.get_head_size()
-        num_heads = model_config.get_num_heads(parallel_config)
+        num_heads = model_config.get_num_kv_heads(parallel_config)
         num_layers = model_config.get_num_layers(parallel_config)
 
         key_cache_block = block_size * num_heads * head_size

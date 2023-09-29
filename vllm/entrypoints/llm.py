@@ -28,6 +28,8 @@ class LLM:
         tokenizer: The name or path of a HuggingFace Transformers tokenizer.
         tokenizer_mode: The tokenizer mode. "auto" will use the fast tokenizer
             if available, and "slow" will always use the slow tokenizer.
+        trust_remote_code: Trust remote code (e.g., from HuggingFace) when
+            downloading the model and tokenizer.
         tensor_parallel_size: The number of GPUs to use for distributed
             execution with tensor parallelism.
         dtype: The data type for the model weights and activations. Currently,
@@ -35,7 +37,22 @@ class LLM:
             the `torch_dtype` attribute specified in the model config file.
             However, if the `torch_dtype` in the config is `float32`, we will
             use `float16` instead.
+        quantization: The method used to quantize the model weights. Currently,
+            we support "awq". If None, we assume the model weights are not
+            quantized and use `dtype` to determine the data type of the weights.
+        revision: The specific model version to use. It can be a branch name,
+            a tag name, or a commit id.
         seed: The seed to initialize the random number generator for sampling.
+        gpu_memory_utilization: The ratio (between 0 and 1) of GPU memory to
+            reserve for the model weights, activations, and KV cache. Higher
+            values will increase the KV cache size and thus improve the model's
+            throughput. However, if the value is too high, it may cause out-of-
+            memory (OOM) errors.
+        swap_space: The size (GiB) of CPU memory per GPU to use as swap space.
+            This can be used for temporarily storing the states of the requests
+            when their `best_of` sampling parameters are larger than 1. If all
+            requests will have `best_of=1`, you can safely set this to 0.
+            Otherwise, too small values may cause out-of-memory (OOM) errors.
     """
 
     def __init__(
@@ -43,9 +60,14 @@ class LLM:
         model: str,
         tokenizer: Optional[str] = None,
         tokenizer_mode: str = "auto",
+        trust_remote_code: bool = False,
         tensor_parallel_size: int = 1,
         dtype: str = "auto",
+        quantization: Optional[str] = None,
+        revision: Optional[str] = None,
         seed: int = 0,
+        gpu_memory_utilization: float = 0.9,
+        swap_space: int = 4,
         **kwargs,
     ) -> None:
         if "disable_log_stats" not in kwargs:
@@ -54,17 +76,21 @@ class LLM:
             model=model,
             tokenizer=tokenizer,
             tokenizer_mode=tokenizer_mode,
+            trust_remote_code=trust_remote_code,
             tensor_parallel_size=tensor_parallel_size,
             dtype=dtype,
+            quantization=quantization,
+            revision=revision,
             seed=seed,
+            gpu_memory_utilization=gpu_memory_utilization,
+            swap_space=swap_space,
             **kwargs,
         )
         self.llm_engine = LLMEngine.from_engine_args(engine_args)
         self.request_counter = Counter()
 
     def get_tokenizer(
-        self,
-    ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
+            self) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
         return self.llm_engine.tokenizer
 
     def set_tokenizer(
@@ -152,4 +178,8 @@ class LLM:
                         pbar.update(1)
         if use_tqdm:
             pbar.close()
+        # Sort the outputs by request ID.
+        # This is necessary because some requests may be finished earlier than
+        # its previous requests.
+        outputs = sorted(outputs, key=lambda x: int(x.request_id))
         return outputs

@@ -74,18 +74,20 @@ template<
 __global__ void single_query_cached_kv_attention_kernel(
   scalar_t* __restrict__ out,             // [num_seqs, num_heads, head_size]
   const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
-  const scalar_t* __restrict__ k_cache,   // [num_blocks, num_heads, head_size/x, block_size, x]
-  const scalar_t* __restrict__ v_cache,   // [num_blocks, num_heads, head_size, block_size]
-  const int* __restrict__ kv_head_mapping,   // [num_seqs]
+  const scalar_t* __restrict__ k_cache,   // [num_blocks, num_kv_heads, head_size/x, block_size, x]
+  const scalar_t* __restrict__ v_cache,   // [num_blocks, num_kv_heads, head_size, block_size]
+  const int* __restrict__ head_mapping,   // [num_heads]
   const float scale,
   const int* __restrict__ block_tables,   // [num_seqs, max_num_blocks_per_seq]
   const int* __restrict__ context_lens,   // [num_seqs]
   const int max_num_blocks_per_seq,
+  const float* __restrict__ alibi_slopes, // [num_heads]
   const int q_stride,
-  const int kv_stride,
+  const int kv_block_stride,
   const int kv_head_stride) {
   constexpr int THREAD_GROUP_SIZE = MAX(WARP_SIZE / BLOCK_SIZE, 1);
-  constexpr int NUM_THREAD_GROUPS_LOWER_BOUND = NUM_THREADS / THREAD_GROUP_SIZE;
+  constexpr int NUM_THREAD_GROUPS = NUM_THREADS / THREAD_GROUP_SIZE; // Note: This assumes THREAD_GROUP_SIZE divides NUM_THREADS
+  assert(NUM_THREADS % THREAD_GROUP_SIZE == 0);
   constexpr int NUM_TOKENS_PER_THREAD_GROUP = (BLOCK_SIZE + WARP_SIZE - 1) / WARP_SIZE;
   constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
   const int thread_idx = threadIdx.x;
@@ -94,7 +96,9 @@ __global__ void single_query_cached_kv_attention_kernel(
 
   const int head_idx = blockIdx.x;
   const int num_heads = gridDim.x;
+  const int kv_head_idx = head_mapping[head_idx];
   const int seq_idx = blockIdx.y;
+  const float alibi_slope = alibi_slopes == nullptr ? 0.f : alibi_slopes[head_idx];
 
   // A vector type to store a part of a key or a query.
   // The vector size is configured in such a way that the threads in a thread group
@@ -119,12 +123,10 @@ __global__ void single_query_cached_kv_attention_kernel(
   // NOTE(woosuk): Because q is split from a qkv tensor, it may not be contiguous.
   const scalar_t* q_ptr = q + seq_idx * q_stride + head_idx * HEAD_SIZE;
   __shared__ Q_vec q_vecs[THREAD_GROUP_SIZE][NUM_VECS_PER_THREAD];
-  if (thread_group_idx <= NUM_THREAD_GROUPS_LOWER_BOUND) {
 #pragma unroll
-      for (int i = thread_group_idx; i < NUM_VECS_PER_THREAD; i += NUM_THREAD_GROUPS_LOWER_BOUND) {
-      const int vec_idx = thread_group_offset + i * THREAD_GROUP_SIZE;
-        q_vecs[thread_group_offset][i] = *reinterpret_cast<const Q_vec*>(q_ptr + vec_idx * VEC_SIZE);
-    }
+  for (int i = thread_group_idx; i < NUM_VECS_PER_THREAD; i += NUM_THREAD_GROUPS) {
+    const int vec_idx = thread_group_offset + i * THREAD_GROUP_SIZE;
+    q_vecs[thread_group_offset][i] = *reinterpret_cast<const Q_vec*>(q_ptr + vec_idx * VEC_SIZE);
   }
   __syncthreads(); // TODO(naed90): possible speedup if this is replaced with a memory wall right before we use q_vecs
 
@@ -164,7 +166,7 @@ __global__ void single_query_cached_kv_attention_kernel(
 
 #pragma unroll
       for (int j = 0; j < NUM_VECS_PER_THREAD; j++) {
-        const scalar_t* k_ptr = k_cache + physical_block_number * kv_stride
+        const scalar_t* k_ptr = k_cache + physical_block_number * kv_block_stride
                                         + kv_head_idx * kv_head_stride
                                         + physical_block_offset * x;
         const int vec_idx = thread_group_offset + j * THREAD_GROUP_SIZE;
@@ -175,12 +177,14 @@ __global__ void single_query_cached_kv_attention_kernel(
 
       // Compute dot product.
       // This includes a reduction across the threads in the same thread group.
-      const float qk = scale * Qk_dot<scalar_t, THREAD_GROUP_SIZE>::dot(q_vecs[thread_group_offset], k_vecs);
-      const bool mask = token_idx >= context_len;
-    
+      float qk = scale * Qk_dot<scalar_t, THREAD_GROUP_SIZE>::dot(q_vecs[thread_group_offset], k_vecs);
+      // Add the ALiBi bias if slopes are given.
+      qk += (alibi_slope != 0) ? alibi_slope * (token_idx - context_len + 1) : 0;
+
       if (thread_group_offset == 0) {
         // Store the partial reductions to shared memory.
         // NOTE(woosuk): It is required to zero out the masked logits.
+        const bool mask = token_idx >= context_len;
         logits[token_idx] = mask ? 0.f : qk;
         // Update the max value.
         qk_max = mask ? qk_max : fmaxf(qk_max, qk);
@@ -252,7 +256,7 @@ __global__ void single_query_cached_kv_attention_kernel(
     L_vec logits_vec;
     from_float(logits_vec, *reinterpret_cast<Float_L_vec*>(logits + token_idx));
 
-    const scalar_t* v_ptr = v_cache + physical_block_number * kv_stride
+    const scalar_t* v_ptr = v_cache + physical_block_number * kv_block_stride
                                     + kv_head_idx * kv_head_stride;
 #pragma unroll
     for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
@@ -338,19 +342,23 @@ __global__ void single_query_cached_kv_attention_kernel(
 } // namespace vllm
 
 #define LAUNCH_ATTENTION_KERNEL(T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS)                        \
+  cudaFuncSetAttribute(                                                                       \
+      vllm::single_query_cached_kv_attention_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>,   \
+      cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem_size);                          \
   vllm::single_query_cached_kv_attention_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>        \
   <<<grid, block, shared_mem_size, stream>>>(                                                 \
     out_ptr,                                                                                  \
     query_ptr,                                                                                \
     key_cache_ptr,                                                                            \
     value_cache_ptr,                                                                          \
-    kv_head_mapping_ptr,                                                                      \
+    head_mapping_ptr,                                                                         \
     scale,                                                                                    \
     block_tables_ptr,                                                                         \
     context_lens_ptr,                                                                         \
     max_num_blocks_per_seq,                                                                   \
-    query_stride,                                                                             \
-    kv_stride,                                                                                \
+    alibi_slopes_ptr,                                                                         \
+    q_stride,                                                                                 \
+    kv_block_stride,                                                                          \
     kv_head_stride);
 
 // TODO(woosuk): Tune NUM_THREADS.
@@ -363,27 +371,33 @@ void single_query_cached_kv_attention_launcher(
   torch::Tensor& query,
   torch::Tensor& key_cache,
   torch::Tensor& value_cache,
-  torch::Tensor& kv_head_mapping,
+  torch::Tensor& head_mapping,
   float scale,
   torch::Tensor& block_tables,
   torch::Tensor& context_lens,
-  int max_context_len) {
+  int max_context_len,
+  const c10::optional<torch::Tensor>& alibi_slopes) {
   int num_seqs = query.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
   int max_num_blocks_per_seq = block_tables.size(1);
-  int query_stride = query.stride(0);
-  int kv_stride = key_cache.stride(0);
+  int q_stride = query.stride(0);
+  int kv_block_stride = key_cache.stride(0);
   int kv_head_stride = key_cache.stride(1);
 
   int thread_group_size = MAX(WARP_SIZE / BLOCK_SIZE, 1);
   assert(head_size % thread_group_size == 0);
 
+  // NOTE: alibi_slopes is optional.
+  const float* alibi_slopes_ptr = alibi_slopes ?
+    reinterpret_cast<const float*>(alibi_slopes.value().data_ptr())
+    : nullptr;
+
   T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
   T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
   T* key_cache_ptr = reinterpret_cast<T*>(key_cache.data_ptr());
   T* value_cache_ptr = reinterpret_cast<T*>(value_cache.data_ptr());
-  int* kv_head_mapping_ptr = kv_head_mapping.data_ptr<int>();
+  int* head_mapping_ptr = reinterpret_cast<int*>(head_mapping.data_ptr());
   int* block_tables_ptr = block_tables.data_ptr<int>();
   int* context_lens_ptr = context_lens.data_ptr<int>();
 
@@ -391,21 +405,16 @@ void single_query_cached_kv_attention_launcher(
   int padded_max_context_len = ((max_context_len + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE;
   int logits_size = padded_max_context_len * sizeof(float);
   int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
-
-  // We over allocate this buffer such that its size won't be too
-  // small no matter which one of logits_size and outputs_size
-  // is larger and even this relative relationship change
-  // during the run (for CUDA Graph)
-  //
-  // int shared_mem_size = std::max(logits_size, outputs_size) + 10000;
-  int shared_mem_size = 48000;
+  // Python-side check in vllm.worker.worker._check_if_can_support_max_seq_len
+  // Keep that in sync with the logic here!
+  int shared_mem_size = std::max(logits_size, outputs_size);
 
   dim3 grid(num_heads, num_seqs);
   dim3 block(NUM_THREADS);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   switch (head_size) {
     // NOTE(woosuk): To reduce the compilation time, we omitted head sizes
-    // 32, 160, 192, 256.
+    // 32, 160, 192.
     // case 32:
     //   LAUNCH_ATTENTION_KERNEL(T, 32, BLOCK_SIZE, NUM_THREADS);
     //   break;
@@ -418,6 +427,9 @@ void single_query_cached_kv_attention_launcher(
     case 96:
       LAUNCH_ATTENTION_KERNEL(T, 96, BLOCK_SIZE, NUM_THREADS);
       break;
+    case 112:
+      LAUNCH_ATTENTION_KERNEL(T, 112, BLOCK_SIZE, NUM_THREADS);
+      break;
     case 128:
       LAUNCH_ATTENTION_KERNEL(T, 128, BLOCK_SIZE, NUM_THREADS);
       break;
@@ -427,9 +439,9 @@ void single_query_cached_kv_attention_launcher(
     // case 192:
     //   LAUNCH_ATTENTION_KERNEL(T, 192, BLOCK_SIZE, NUM_THREADS);
     //   break;
-    // case 256:
-    //   LAUNCH_ATTENTION_KERNEL(T, 256, BLOCK_SIZE, NUM_THREADS);
-    //   break;
+    case 256:
+      LAUNCH_ATTENTION_KERNEL(T, 256, BLOCK_SIZE, NUM_THREADS);
+      break;
     default:
       TORCH_CHECK(false, "Unsupported head size: ", head_size);
       break;
@@ -442,11 +454,12 @@ void single_query_cached_kv_attention_launcher(
     query,                                                          \
     key_cache,                                                      \
     value_cache,                                                    \
-    kv_head_mapping,                                                \
+    head_mapping,                                                   \
     scale,                                                          \
     block_tables,                                                   \
     context_lens,                                                   \
-    max_context_len);
+    max_context_len,                                                \
+    alibi_slopes);
 
 // NOTE(woosuk): To reduce the compilation time, we omitted block sizes
 // 1, 2, 4, 64, 128, 256.
@@ -489,12 +502,13 @@ void single_query_cached_kv_attention(
   torch::Tensor& query,           // [num_seqs, num_heads, head_size]
   torch::Tensor& key_cache,       // [num_blocks, num_heads, head_size/x, block_size, x]
   torch::Tensor& value_cache,     // [num_blocks, num_heads, head_size, block_size]
-  torch::Tensor& kv_head_mapping, // [num_heads]
+  torch::Tensor& head_mapping,    // [num_heads]
   float scale,
   torch::Tensor& block_tables,    // [num_seqs, max_num_blocks_per_seq]
   torch::Tensor& context_lens,    // [num_seqs]
   int block_size,
-  int max_context_len) {
+  int max_context_len,
+  const c10::optional<torch::Tensor>& alibi_slopes) {
   if (query.dtype() == at::ScalarType::Float) {
     CALL_KERNEL_LAUNCHER_BLOCK_SIZE(float);
   } else if (query.dtype() == at::ScalarType::Half) {
