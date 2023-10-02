@@ -89,29 +89,39 @@ attention_extension = CUDAExtension(
 ext_modules.append(attention_extension)
 
 # Positional encoding kernels.
-# positional_encoding_extension = CUDAExtension(
-#     name="vllm.pos_encoding_ops",
-#     sources=["csrc/pos_encoding.cpp", "csrc/pos_encoding_kernels.cu"],
-#     extra_compile_args={"cxx": CXX_FLAGS, "nvcc": NVCC_FLAGS},
-# )
-# ext_modules.append(positional_encoding_extension)
+positional_encoding_extension = CUDAExtension(
+    name="vllm_pos_encoding_ops",
+    sources=["csrc/pos_encoding.cpp", "csrc/pos_encoding_kernels.cu"],
+    extra_compile_args={"cxx": CXX_FLAGS, "nvcc": NVCC_FLAGS},
+)
+ext_modules.append(positional_encoding_extension)
 
 # Layer normalization kernels.
-# layernorm_extension = CUDAExtension(
-#     name="vllm.layernorm_ops",
-#     sources=["csrc/layernorm.cpp", "csrc/layernorm_kernels.cu"],
-#     extra_compile_args={"cxx": CXX_FLAGS, "nvcc": NVCC_FLAGS},
-# )
-# ext_modules.append(layernorm_extension)
+layernorm_extension = CUDAExtension(
+    name="vllm_layernorm_ops",
+    sources=["csrc/layernorm.cpp", "csrc/layernorm_kernels.cu"],
+    extra_compile_args={"cxx": CXX_FLAGS, "nvcc": NVCC_FLAGS},
+)
+ext_modules.append(layernorm_extension)
 
 # Activation kernels.
-# activation_extension = CUDAExtension(
-#     name="vllm.activation_ops",
-#     sources=["csrc/activation.cpp", "csrc/activation_kernels.cu"],
-#     extra_compile_args={"cxx": CXX_FLAGS, "nvcc": NVCC_FLAGS},
-# )
-# ext_modules.append(activation_extension)
+activation_extension = CUDAExtension(
+    name="vllm_activation_ops",
+    sources=["csrc/activation.cpp", "csrc/activation_kernels.cu"],
+    extra_compile_args={"cxx": CXX_FLAGS, "nvcc": NVCC_FLAGS},
+)
+ext_modules.append(activation_extension)
 
+# Misc. CUDA utils.
+cuda_utils_extension = CUDAExtension(
+    name="vllm_cuda_utils",
+    sources=["csrc/cuda_utils.cpp", "csrc/cuda_utils_kernels.cu"],
+    extra_compile_args={
+        "cxx": CXX_FLAGS,
+        "nvcc": NVCC_FLAGS,
+    },
+)
+ext_modules.append(cuda_utils_extension)
 
 def get_path(*filepath) -> str:
     return os.path.join(ROOT_DIR, *filepath)

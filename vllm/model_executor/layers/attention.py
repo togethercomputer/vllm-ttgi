@@ -5,9 +5,10 @@ import torch
 import torch.nn as nn
 from xformers import ops as xops
 
-from vllm import attention_ops
-from vllm import cache_ops
-from vllm import pos_encoding_ops
+import vllm_activation_ops as activation_ops
+import vllm_cache_ops as cache_ops
+import vllm_pos_encoding_ops as pos_encoding_ops
+import vllm_attention_ops as attention_ops
 from vllm.model_executor.input_metadata import InputMetadata
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 128]
@@ -47,6 +48,12 @@ class PagedAttention(nn.Module):
         self.head_size = head_size
         self.scale = float(scale)
         self.attn_op = xops.fmha.cutlass.FwOp()
+
+        self.num_kv_heads = self.num_heads # hardcode
+        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+        self.head_mapping = torch.repeat_interleave(
+            torch.arange(self.num_kv_heads, dtype=torch.int32, device="cuda"),
+            self.num_queries_per_kv)
 
         if self.head_size not in _SUPPORTED_HEAD_SIZES:
             raise ValueError(f"head_size ({self.head_size}) is not supported. "
@@ -88,12 +95,27 @@ class PagedAttention(nn.Module):
             query,
             key_cache,
             value_cache,
+            self.head_mapping,
             self.scale,
             input_metadata.block_tables,
             input_metadata.context_lens,
             block_size,
-            input_metadata.max_context_len,
+            # input_metadata.max_context_len,
+            -1,
         )
+        # single_query_cached_kv_attention(
+        #         attn_output,
+        #         query,
+        #         kcache,
+        #         vcache,
+        #         self.kv_head_mapping,
+        #         self.softmax_scale,
+        #         block_tables,
+        #         input_lengths,
+        #         block_size,
+        #         #max_s_tensor,
+        #         -1  # changed the kernel to not use this
+        #     )
 
     def forward(
         self,

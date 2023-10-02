@@ -338,6 +338,9 @@ __global__ void single_query_cached_kv_attention_kernel(
 } // namespace vllm
 
 #define LAUNCH_ATTENTION_KERNEL(T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS)                        \
+  cudaFuncSetAttribute(                                                                       \
+      vllm::single_query_cached_kv_attention_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>,   \
+      cudaFuncAttributeMaxDynamicSharedMemorySize, shared_mem_size);                          \
   vllm::single_query_cached_kv_attention_kernel<T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS>        \
   <<<grid, block, shared_mem_size, stream>>>(                                                 \
     out_ptr,                                                                                  \
@@ -398,7 +401,8 @@ void single_query_cached_kv_attention_launcher(
   // during the run (for CUDA Graph)
   //
   // int shared_mem_size = std::max(logits_size, outputs_size) + 10000;
-  int shared_mem_size = 48000;
+  // int shared_mem_size = 48000;
+  int shared_mem_size = std::max(logits_size, outputs_size);
 
   dim3 grid(num_heads, num_seqs);
   dim3 block(NUM_THREADS);
