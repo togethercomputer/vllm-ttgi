@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 
-from vllm import activation_ops
+import vllm_activation_ops as activation_ops
 
 _ACTIVATION_REGISTRY = {
     "gelu": nn.GELU(),
