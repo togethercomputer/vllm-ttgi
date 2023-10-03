@@ -22,7 +22,6 @@
 #include "attention_utils.cuh"
 
 #include <algorithm>
-#include <iostream>
 
 #define WARP_SIZE 32
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
