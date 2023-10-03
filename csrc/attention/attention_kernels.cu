@@ -22,6 +22,7 @@
 #include "attention_utils.cuh"
 
 #include <algorithm>
+#include <iostream>
 
 #define WARP_SIZE 32
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
@@ -266,7 +267,7 @@ __global__ void single_query_cached_kv_attention_kernel(
           // See https://github.com/vllm-project/vllm/issues/641#issuecomment-1682544472
           scalar_t* v_vec_ptr = reinterpret_cast<scalar_t*>(&v_vec);
 #pragma unroll
-          for (int j = 0; j <= V_VEC_SIZE; j++) {
+          for (int j = 0; j < V_VEC_SIZE; j++) {
             v_vec_ptr[j] = token_idx + j < context_len ? v_vec_ptr[j] : zero_value;
           }
         }
@@ -370,7 +371,8 @@ void single_query_cached_kv_attention_launcher(
   float scale,
   torch::Tensor& block_tables,
   torch::Tensor& context_lens,
-  int max_context_len) {
+  int max_context_len
+) {
   int num_seqs = query.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
@@ -391,6 +393,9 @@ void single_query_cached_kv_attention_launcher(
   int* context_lens_ptr = context_lens.data_ptr<int>();
 
   constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
+  if (max_context_len <= 0) {
+    max_context_len = 32*1024; // default to use a large enough context length
+  }
   int padded_max_context_len = ((max_context_len + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE;
   int logits_size = padded_max_context_len * sizeof(float);
   int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
@@ -402,7 +407,7 @@ void single_query_cached_kv_attention_launcher(
   //
   // int shared_mem_size = std::max(logits_size, outputs_size) + 10000;
   // int shared_mem_size = 48000;
-  int shared_mem_size = std::max(logits_size, outputs_size);
+  int shared_mem_size = std::max(logits_size, outputs_size) + 10000;
 
   dim3 grid(num_heads, num_seqs);
   dim3 block(NUM_THREADS);

@@ -100,22 +100,8 @@ class PagedAttention(nn.Module):
             input_metadata.block_tables,
             input_metadata.context_lens,
             block_size,
-            # input_metadata.max_context_len,
-            -1,
+            input_metadata.max_context_len,
         )
-        # single_query_cached_kv_attention(
-        #         attn_output,
-        #         query,
-        #         kcache,
-        #         vcache,
-        #         self.kv_head_mapping,
-        #         self.softmax_scale,
-        #         block_tables,
-        #         input_lengths,
-        #         block_size,
-        #         #max_s_tensor,
-        #         -1  # changed the kernel to not use this
-        #     )
 
     def forward(
         self,
